@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.5)
 project(RN-Praxis)
 set(CMAKE_C_STANDARD 11)
 
-add_executable(webserver <source files>)
+add_executable(webserver
+    src/webserver.c
+)
 target_compile_options(webserver PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(webserver PRIVATE -lm)
 
