@@ -365,28 +365,43 @@ static int create_server_socket(const char *host, const char *port) {
 
     int server_fd = -1;
 
-    for (struct addrinfo *p = info; p != NULL; p = p->ai_next) {
-        server_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (server_fd < 0) {
-            continue;
-        }
-
-        int opt = 1;
-        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        if (p->ai_family == AF_INET6) {
-            int off = 0;
-            setsockopt(server_fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
-        }
-
-        if (bind(server_fd, p->ai_addr, p->ai_addrlen) == 0) {
-            if (listen(server_fd, 10) == 0) {
-                break;
+    /*
+     * Try IPv4 addresses first. Some systems do not accept IPv4-mapped
+     * connections on an IPv6 socket even when IPV6_V6ONLY is disabled, which
+     * can lead to "connection refused" for clients using 127.0.0.1. Falling
+     * back to any remaining addresses keeps the dual-stack support intact.
+     */
+    for (int pass = 0; pass < 2 && server_fd < 0; ++pass) {
+        for (struct addrinfo *p = info; p != NULL; p = p->ai_next) {
+            if (pass == 0 && p->ai_family != AF_INET) {
+                continue;
             }
-        }
+            if (pass == 1 && p->ai_family == AF_INET) {
+                continue;
+            }
 
-        close(server_fd);
-        server_fd = -1;
+            server_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+            if (server_fd < 0) {
+                continue;
+            }
+
+            int opt = 1;
+            setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+            if (p->ai_family == AF_INET6) {
+                int off = 0;
+                setsockopt(server_fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+            }
+
+            if (bind(server_fd, p->ai_addr, p->ai_addrlen) == 0) {
+                if (listen(server_fd, 10) == 0) {
+                    break;
+                }
+            }
+
+            close(server_fd);
+            server_fd = -1;
+        }
     }
 
     freeaddrinfo(info);
