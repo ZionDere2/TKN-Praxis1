@@ -47,25 +47,29 @@ static int store_resource(const char *path, const unsigned char *data, size_t le
         for (int i = 0; i < MAX_RESOURCES; ++i) {
             if (!resources[i].used) {
                 idx = i;
+                resources[i].used = true;
+                strncpy(resources[i].path, path, sizeof(resources[i].path) - 1);
+                resources[i].path[sizeof(resources[i].path) - 1] = '\0';
                 break;
             }
         }
-        if (idx == -1) {
-            return -1;
-        }
-        resources[idx].used = true;
-        strncpy(resources[idx].path, path, sizeof(resources[idx].path) - 1);
-        resources[idx].path[sizeof(resources[idx].path) - 1] = '\0';
     } else {
         free(resources[idx].data);
     }
 
+    if (idx == -1) {
+        return -1;
+    }
+
     resources[idx].data = (unsigned char *)malloc(len);
-    if (!resources[idx].data && len > 0) {
+    if (len > 0 && !resources[idx].data) {
         resources[idx].used = false;
         return -1;
     }
-    memcpy(resources[idx].data, data, len);
+
+    if (len > 0) {
+        memcpy(resources[idx].data, data, len);
+    }
     resources[idx].len = len;
     return idx;
 }
@@ -83,98 +87,112 @@ static void delete_resource(const char *path) {
 
 static void send_response(int client_fd, int status, const char *status_text, const unsigned char *payload, size_t payload_len) {
     char header[512];
-    int n = snprintf(header, sizeof(header), "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\n\r\n", status, status_text, payload_len);
-    if (n < 0) {
+    int header_len = snprintf(header, sizeof(header), "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\n\r\n", status, status_text, payload_len);
+    if (header_len < 0) {
         return;
     }
-    send(client_fd, header, (size_t)n, 0);
+
+    send(client_fd, header, (size_t)header_len, 0);
     if (payload_len > 0 && payload) {
         send(client_fd, payload, payload_len, 0);
     }
 }
 
-static bool parse_headers(const char *headers_start, const char *headers_end, size_t *content_length) {
-    const char *line_start = headers_start;
-    *content_length = 0;
-    int header_count = 0;
+static const char *find_crlf(const unsigned char *buf, size_t len) {
+    for (size_t i = 0; i + 1 < len; ++i) {
+        if (buf[i] == '\r' && buf[i + 1] == '\n') {
+            return (const char *)(buf + i);
+        }
+    }
+    return NULL;
+}
 
-    while (line_start < headers_end && !(line_start[0] == '\r' && line_start[1] == '\n')) {
-        const char *line_end = strstr(line_start, "\r\n");
-        if (!line_end || line_end > headers_end) {
+static bool parse_headers(const char *start, const char *end, size_t *content_length) {
+    int header_count = 0;
+    *content_length = 0;
+
+    const char *line = start;
+    while (line < end && !(line[0] == '\r' && line[1] == '\n')) {
+        const char *line_end = strstr(line, "\r\n");
+        if (!line_end || line_end > end) {
             return false;
         }
-        size_t line_len = (size_t)(line_end - line_start);
+        size_t line_len = (size_t)(line_end - line);
         if (line_len == 0 || line_len >= MAX_LINE_LENGTH) {
             return false;
         }
-        char line[MAX_LINE_LENGTH];
-        memcpy(line, line_start, line_len);
-        line[line_len] = '\0';
 
-        char *colon = strchr(line, ':');
-        if (!colon || colon == line) {
+        char tmp[MAX_LINE_LENGTH];
+        memcpy(tmp, line, line_len);
+        tmp[line_len] = '\0';
+
+        char *colon = strchr(tmp, ':');
+        if (!colon) {
             return false;
         }
-        if (*(colon + 1) != ' ') {
+        if (colon == tmp || colon[1] != ' ') {
             return false;
         }
+
         *colon = '\0';
         const char *value = colon + 2;
 
-        if (strcasecmp(line, "Content-Length") == 0) {
+        if (strcasecmp(tmp, "Content-Length") == 0) {
             char *endptr = NULL;
-            long val = strtol(value, &endptr, 10);
-            if (endptr == value || val < 0) {
+            long v = strtol(value, &endptr, 10);
+            if (endptr == value || v < 0) {
                 return false;
             }
-            *content_length = (size_t)val;
+            *content_length = (size_t)v;
         }
 
         header_count++;
         if (header_count > MAX_HEADERS) {
             return false;
         }
-        line_start = line_end + 2;
+
+        line = line_end + 2;
     }
 
     return true;
 }
 
-static int parse_request(const unsigned char *buffer, size_t buf_len, struct http_request *req, size_t *consumed) {
-    const unsigned char *header_end_ptr = NULL;
+static int parse_request(const unsigned char *buf, size_t buf_len, struct http_request *req, size_t *consumed) {
+    const char *header_end = NULL;
     for (size_t i = 0; i + 3 < buf_len; ++i) {
-        if (buffer[i] == '\r' && buffer[i + 1] == '\n' && buffer[i + 2] == '\r' && buffer[i + 3] == '\n') {
-            header_end_ptr = buffer + i + 4;
+        if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') {
+            header_end = (const char *)(buf + i + 4);
             break;
         }
     }
-    if (!header_end_ptr) {
+
+    if (!header_end) {
         return 0; // incomplete
     }
 
-    size_t header_len = (size_t)(header_end_ptr - buffer);
+    size_t header_len = (size_t)(header_end - (const char *)buf);
     if (header_len >= MAX_REQUEST_SIZE) {
         *consumed = header_len;
         return -1;
     }
 
-    const unsigned char *body_start = header_end_ptr;
-
-    const unsigned char *line_end_ptr = (const unsigned char *)memmem(buffer, header_len, "\r\n", 2);
-    if (!line_end_ptr) {
-        *consumed = header_len;
-        return -1;
-    }
-    size_t startline_len = (size_t)(line_end_ptr - buffer);
-    if (startline_len == 0 || startline_len >= MAX_LINE_LENGTH) {
+    const char *first_crlf = find_crlf(buf, header_len);
+    if (!first_crlf) {
         *consumed = header_len;
         return -1;
     }
 
-    char startline[MAX_LINE_LENGTH];
-    memcpy(startline, buffer, startline_len);
-    startline[startline_len] = '\0';
-    if (sscanf(startline, "%255s %255s %255s", req->method, req->path, req->version) != 3) {
+    size_t start_line_len = (size_t)(first_crlf - (const char *)buf);
+    if (start_line_len == 0 || start_line_len >= MAX_LINE_LENGTH) {
+        *consumed = header_len;
+        return -1;
+    }
+
+    char start_line[MAX_LINE_LENGTH];
+    memcpy(start_line, buf, start_line_len);
+    start_line[start_line_len] = '\0';
+
+    if (sscanf(start_line, "%255s %255s %255s", req->method, req->path, req->version) != 3) {
         *consumed = header_len;
         return -1;
     }
@@ -184,8 +202,8 @@ static int parse_request(const unsigned char *buffer, size_t buf_len, struct htt
         return -1;
     }
 
-    const char *headers_start = (const char *)(line_end_ptr + 2);
-    const char *headers_end = (const char *)(header_end_ptr - 2);
+    const char *headers_start = first_crlf + 2;
+    const char *headers_end = header_end - 2;
 
     size_t content_length = 0;
     if (!parse_headers(headers_start, headers_end, &content_length)) {
@@ -193,14 +211,14 @@ static int parse_request(const unsigned char *buffer, size_t buf_len, struct htt
         return -1;
     }
 
-    size_t total_length = header_len + content_length;
-    if (buf_len < total_length) {
-        return 0; // wait for rest
+    size_t total_len = header_len + content_length;
+    if (buf_len < total_len) {
+        return 0; // need more data
     }
 
     req->content_length = content_length;
-    req->body = (const char *)body_start;
-    *consumed = total_length;
+    req->body = (const char *)(buf + header_len);
+    *consumed = total_len;
     return 1;
 }
 
@@ -220,11 +238,12 @@ static void handle_request(int client_fd, const struct http_request *req) {
             } else if (strcmp(resource, "baz") == 0) {
                 payload = "Baz";
             }
+
             if (payload) {
                 send_response(client_fd, 200, "OK", (const unsigned char *)payload, strlen(payload));
-                return;
+            } else {
+                send_response(client_fd, 404, "Not Found", NULL, 0);
             }
-            send_response(client_fd, 404, "Not Found", NULL, 0);
             return;
         }
 
@@ -247,12 +266,14 @@ static void handle_request(int client_fd, const struct http_request *req) {
             send_response(client_fd, 403, "Forbidden", NULL, 0);
             return;
         }
-        int existing = find_resource(req->path);
+
+        int already = find_resource(req->path);
         if (store_resource(req->path, (const unsigned char *)req->body, req->content_length) == -1) {
             send_response(client_fd, 500, "Internal Server Error", NULL, 0);
             return;
         }
-        if (existing == -1) {
+
+        if (already == -1) {
             send_response(client_fd, 201, "Created", NULL, 0);
         } else {
             send_response(client_fd, 204, "No Content", NULL, 0);
@@ -265,8 +286,9 @@ static void handle_request(int client_fd, const struct http_request *req) {
             send_response(client_fd, 403, "Forbidden", NULL, 0);
             return;
         }
-        int existing = find_resource(req->path);
-        if (existing == -1) {
+
+        int idx = find_resource(req->path);
+        if (idx == -1) {
             send_response(client_fd, 404, "Not Found", NULL, 0);
         } else {
             delete_resource(req->path);
@@ -280,56 +302,52 @@ static void handle_request(int client_fd, const struct http_request *req) {
 
 static void handle_connection(int client_fd) {
     unsigned char buffer[MAX_REQUEST_SIZE * 2];
-    size_t buf_len = 0;
+    size_t buffered = 0;
 
     while (1) {
-        ssize_t received = recv(client_fd, buffer + buf_len, sizeof(buffer) - buf_len, 0);
-        if (received <= 0) {
+        ssize_t got = recv(client_fd, buffer + buffered, sizeof(buffer) - buffered, 0);
+        if (got <= 0) {
             break;
         }
-        buf_len += (size_t)received;
+        buffered += (size_t)got;
 
-        size_t offset = 0;
-        while (offset < buf_len) {
+        size_t consumed_total = 0;
+        while (consumed_total < buffered) {
             struct http_request req;
             size_t consumed = 0;
-            int parse_result = parse_request(buffer + offset, buf_len - offset, &req, &consumed);
-            if (parse_result == 0) {
-                break; // need more data
-            } else if (parse_result < 0) {
-                send_response(client_fd, 400, "Bad Request", NULL, 0);
-                offset += consumed;
-                continue;
-            } else {
-                handle_request(client_fd, &req);
-                offset += consumed;
+            int r = parse_request(buffer + consumed_total, buffered - consumed_total, &req, &consumed);
+            if (r == 0) {
+                break;
             }
+            if (r < 0) {
+                send_response(client_fd, 400, "Bad Request", NULL, 0);
+                consumed_total += consumed;
+                continue;
+            }
+
+            handle_request(client_fd, &req);
+            consumed_total += consumed;
         }
 
-        if (offset > 0 && offset < buf_len) {
-            memmove(buffer, buffer + offset, buf_len - offset);
+        if (consumed_total > 0 && consumed_total < buffered) {
+            memmove(buffer, buffer + consumed_total, buffered - consumed_total);
         }
-        if (offset > 0) {
-            buf_len -= offset;
+        if (consumed_total > 0) {
+            buffered -= consumed_total;
         }
     }
 }
 
 static int create_server_socket(const char *host, const char *port) {
-    struct addrinfo hints = {
-        .ai_family = AF_UNSPEC,
-        .ai_socktype = SOCK_STREAM,
-        .ai_flags = 0,
-    };
-    // AI_PASSIVE tells getaddrinfo to return wildcard addresses (e.g., :: or 0.0.0.0)
-    // when no specific host is provided so that bind() will listen on all interfaces.
-    // For explicit hosts we skip it, otherwise a concrete address like "127.0.0.1"
-    // might be replaced with a wildcard on some platforms.
-    if (host == NULL || host[0] == '\0') {
-        hints.ai_flags |= AI_PASSIVE;
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (!host || host[0] == '\0') {
+        hints.ai_flags = AI_PASSIVE;
     }
-    struct addrinfo *info = NULL;
 
+    struct addrinfo *info = NULL;
     int rc = getaddrinfo(host, port, &hints, &info);
     if (rc != 0) {
         fprintf(stderr, "Error parsing host/port: %s\n", gai_strerror(rc));
@@ -337,6 +355,7 @@ static int create_server_socket(const char *host, const char *port) {
     }
 
     int server_fd = -1;
+
     for (struct addrinfo *p = info; p != NULL; p = p->ai_next) {
         server_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (server_fd < 0) {
@@ -344,20 +363,16 @@ static int create_server_socket(const char *host, const char *port) {
         }
 
         int opt = 1;
-        if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-            close(server_fd);
-            server_fd = -1;
-            continue;
-        }
+        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
         if (p->ai_family == AF_INET6) {
-            int v6_only = 0;
-            setsockopt(server_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6_only, sizeof(v6_only));
+            int off = 0;
+            setsockopt(server_fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
         }
 
         if (bind(server_fd, p->ai_addr, p->ai_addrlen) == 0) {
             if (listen(server_fd, 10) == 0) {
-                break; // success
+                break;
             }
         }
 
@@ -389,12 +404,12 @@ int main(int argc, char *argv[]) {
         int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) {
             if (errno == EINTR || errno == ECONNABORTED) {
-                // Transient errors should not tear down the server loop; try accepting again.
                 continue;
             }
             perror("accept");
             break;
         }
+
         handle_connection(client_fd);
         close(client_fd);
     }
