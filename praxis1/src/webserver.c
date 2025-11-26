@@ -319,8 +319,11 @@ static int create_server_socket(const char *host, const char *port) {
     struct addrinfo hints = {
         .ai_family = AF_UNSPEC,
         .ai_socktype = SOCK_STREAM,
-        .ai_flags = AI_PASSIVE,
+        .ai_flags = 0,
     };
+    if (host == NULL || host[0] == '\0') {
+        hints.ai_flags |= AI_PASSIVE;
+    }
     struct addrinfo *info = NULL;
 
     int rc = getaddrinfo(host, port, &hints, &info);
