@@ -15,6 +15,12 @@
 #define MAX_LINE_LENGTH 256
 #define MAX_RESOURCES 100
 
+/*
+ * The code in this file is intentionally straightforward. Instead of clever
+ * abstractions it leans on explicit loops and a few helper structs so it looks
+ * like something a student would build while experimenting with sockets.
+ */
+
 struct http_request {
     char method[MAX_LINE_LENGTH];
     char path[MAX_LINE_LENGTH];
@@ -98,125 +104,128 @@ static void send_response(int client_fd, int status, const char *status_text, co
     }
 }
 
-static const char *find_crlf(const unsigned char *buf, size_t len) {
-    for (size_t i = 0; i + 1 < len; ++i) {
-        if (buf[i] == '\r' && buf[i + 1] == '\n') {
-            return (const char *)(buf + i);
-        }
-    }
-    return NULL;
-}
-
-static bool parse_headers(const char *start, const char *end, size_t *content_length) {
-    int header_count = 0;
+static bool parse_headers(const char *begin, const char *end, size_t *content_length) {
+    /*
+     * This parser is intentionally literal: walk line by line, look for a
+     * colon, and keep track of the number of headers seen. If anything looks
+     * odd, return false.
+     */
+    int seen = 0;
     *content_length = 0;
 
-    const char *line = start;
-    while (line < end && !(line[0] == '\r' && line[1] == '\n')) {
-        const char *line_end = strstr(line, "\r\n");
+    const char *cursor = begin;
+    while (cursor < end && !(cursor[0] == '\r' && cursor[1] == '\n')) {
+        const char *line_end = strstr(cursor, "\r\n");
         if (!line_end || line_end > end) {
             return false;
         }
-        size_t line_len = (size_t)(line_end - line);
+
+        size_t line_len = (size_t)(line_end - cursor);
         if (line_len == 0 || line_len >= MAX_LINE_LENGTH) {
             return false;
         }
 
-        char tmp[MAX_LINE_LENGTH];
-        memcpy(tmp, line, line_len);
-        tmp[line_len] = '\0';
+        char scratch[MAX_LINE_LENGTH];
+        memcpy(scratch, cursor, line_len);
+        scratch[line_len] = '\0';
 
-        char *colon = strchr(tmp, ':');
+        char *colon = strchr(scratch, ':');
         if (!colon) {
             return false;
         }
-        if (colon == tmp || colon[1] != ' ') {
+        if (colon == scratch || colon[1] != ' ') {
             return false;
         }
 
         *colon = '\0';
         const char *value = colon + 2;
-
-        if (strcasecmp(tmp, "Content-Length") == 0) {
-            char *endptr = NULL;
-            long v = strtol(value, &endptr, 10);
-            if (endptr == value || v < 0) {
+        if (strcasecmp(scratch, "Content-Length") == 0) {
+            char *tail = NULL;
+            long parsed = strtol(value, &tail, 10);
+            if (tail == value || parsed < 0) {
                 return false;
             }
-            *content_length = (size_t)v;
+            *content_length = (size_t)parsed;
         }
 
-        header_count++;
-        if (header_count > MAX_HEADERS) {
+        seen++;
+        if (seen > MAX_HEADERS) {
             return false;
         }
 
-        line = line_end + 2;
+        cursor = line_end + 2;
     }
 
     return true;
 }
 
 static int parse_request(const unsigned char *buf, size_t buf_len, struct http_request *req, size_t *consumed) {
-    const char *header_end = NULL;
+    /* find end of headers (CRLFCRLF) */
+    const unsigned char *marker = NULL;
     for (size_t i = 0; i + 3 < buf_len; ++i) {
         if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') {
-            header_end = (const char *)(buf + i + 4);
+            marker = buf + i + 4;
             break;
         }
     }
 
-    if (!header_end) {
-        return 0; // incomplete
+    if (!marker) {
+        return 0; /* need more bytes */
     }
 
-    size_t header_len = (size_t)(header_end - (const char *)buf);
+    size_t header_len = (size_t)(marker - buf);
     if (header_len >= MAX_REQUEST_SIZE) {
         *consumed = header_len;
         return -1;
     }
 
-    const char *first_crlf = find_crlf(buf, header_len);
-    if (!first_crlf) {
+    /* start line */
+    const unsigned char *line_end = NULL;
+    for (size_t i = 0; i + 1 < header_len; ++i) {
+        if (buf[i] == '\r' && buf[i + 1] == '\n') {
+            line_end = buf + i;
+            break;
+        }
+    }
+    if (!line_end) {
         *consumed = header_len;
         return -1;
     }
 
-    size_t start_line_len = (size_t)(first_crlf - (const char *)buf);
-    if (start_line_len == 0 || start_line_len >= MAX_LINE_LENGTH) {
+    size_t first_len = (size_t)(line_end - buf);
+    if (first_len == 0 || first_len >= MAX_LINE_LENGTH) {
         *consumed = header_len;
         return -1;
     }
 
-    char start_line[MAX_LINE_LENGTH];
-    memcpy(start_line, buf, start_line_len);
-    start_line[start_line_len] = '\0';
+    char first_line[MAX_LINE_LENGTH];
+    memcpy(first_line, buf, first_len);
+    first_line[first_len] = '\0';
 
-    if (sscanf(start_line, "%255s %255s %255s", req->method, req->path, req->version) != 3) {
+    if (sscanf(first_line, "%255s %255s %255s", req->method, req->path, req->version) != 3) {
         *consumed = header_len;
         return -1;
     }
-
     if (strncmp(req->version, "HTTP/1.", 7) != 0) {
         *consumed = header_len;
         return -1;
     }
 
-    const char *headers_start = first_crlf + 2;
-    const char *headers_end = header_end - 2;
+    const char *header_start = (const char *)(line_end + 2);
+    const char *header_stop = (const char *)marker - 2;
 
-    size_t content_length = 0;
-    if (!parse_headers(headers_start, headers_end, &content_length)) {
+    size_t payload_size = 0;
+    if (!parse_headers(header_start, header_stop, &payload_size)) {
         *consumed = header_len;
         return -1;
     }
 
-    size_t total_len = header_len + content_length;
+    size_t total_len = header_len + payload_size;
     if (buf_len < total_len) {
-        return 0; // need more data
+        return 0; /* headers done, body incomplete */
     }
 
-    req->content_length = content_length;
+    req->content_length = payload_size;
     req->body = (const char *)(buf + header_len);
     *consumed = total_len;
     return 1;
