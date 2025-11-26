@@ -16,3 +16,10 @@ If your shell cannot find `test/check_submission.sh`, change to the project root
 > The script packages the project, rebuilds it in a temporary directory, and calls
 > pytest with the correct executable paths. You do not need to start the server
 > manually.
+
+## Common gotchas
+
+- **CMake cannot find `src/webserver.c`** – this happens if you start the script
+  from the wrong folder or if the source tree is incomplete. Make sure you are in
+  the `praxis1` directory (the one containing `src/webserver.c` and
+  `CMakeLists.txt`) before running `bash test/check_submission.sh praxis1`.
