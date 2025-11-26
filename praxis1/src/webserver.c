@@ -75,7 +75,7 @@ static int store_resource(const char *path, const unsigned char *data, size_t le
         free(resources[idx].data);
     }
 
-    resources[idx].data = malloc(len);
+    resources[idx].data = (unsigned char *)malloc(len);
     if (!resources[idx].data && len > 0) {
         resources[idx].used = false;
         return -1;
@@ -175,7 +175,7 @@ static int parse_request(const unsigned char *buffer, size_t buf_len, struct htt
 
     const unsigned char *body_start = header_end_ptr;
 
-    const unsigned char *line_end_ptr = memmem(buffer, header_len, "\r\n", 2);
+    const unsigned char *line_end_ptr = (const unsigned char *)memmem(buffer, header_len, "\r\n", 2);
     if (!line_end_ptr) {
         *consumed = header_len;
         return -1;
