@@ -321,6 +321,10 @@ static int create_server_socket(const char *host, const char *port) {
         .ai_socktype = SOCK_STREAM,
         .ai_flags = 0,
     };
+    // AI_PASSIVE tells getaddrinfo to return wildcard addresses (e.g., :: or 0.0.0.0)
+    // when no specific host is provided so that bind() will listen on all interfaces.
+    // For explicit hosts we skip it, otherwise a concrete address like "127.0.0.1"
+    // might be replaced with a wildcard on some platforms.
     if (host == NULL || host[0] == '\0') {
         hints.ai_flags |= AI_PASSIVE;
     }
