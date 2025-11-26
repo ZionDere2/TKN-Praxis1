@@ -373,7 +373,8 @@ int main(int argc, char *argv[]) {
         socklen_t client_len = sizeof(client_addr);
         int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) {
-            if (errno == EINTR) {
+            if (errno == EINTR || errno == ECONNABORTED) {
+                // Transient errors should not tear down the server loop; try accepting again.
                 continue;
             }
             perror("accept");
