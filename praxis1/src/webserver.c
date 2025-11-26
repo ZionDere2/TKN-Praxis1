@@ -32,21 +32,6 @@ struct resource_entry {
 
 static struct resource_entry resources[MAX_RESOURCES];
 
-static struct sockaddr_in derive_sockaddr(const char *host, const char *port) {
-    struct addrinfo hints = {
-        .ai_family = AF_INET,
-    };
-    struct addrinfo *result_info;
-    int returncode = getaddrinfo(host, port, &hints, &result_info);
-    if (returncode) {
-        fprintf(stderr, "Error parsing host/port\n");
-        exit(EXIT_FAILURE);
-    }
-    struct sockaddr_in result = *((struct sockaddr_in *)result_info->ai_addr);
-    freeaddrinfo(result_info);
-    return result;
-}
-
 static int find_resource(const char *path) {
     for (int i = 0; i < MAX_RESOURCES; ++i) {
         if (resources[i].used && strcmp(resources[i].path, path) == 0) {
@@ -331,29 +316,52 @@ static void handle_connection(int client_fd) {
 }
 
 static int create_server_socket(const char *host, const char *port) {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct addrinfo hints = {
+        .ai_family = AF_UNSPEC,
+        .ai_socktype = SOCK_STREAM,
+        .ai_flags = AI_PASSIVE,
+    };
+    struct addrinfo *info = NULL;
+
+    int rc = getaddrinfo(host, port, &hints, &info);
+    if (rc != 0) {
+        fprintf(stderr, "Error parsing host/port: %s\n", gai_strerror(rc));
+        exit(EXIT_FAILURE);
+    }
+
+    int server_fd = -1;
+    for (struct addrinfo *p = info; p != NULL; p = p->ai_next) {
+        server_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (server_fd < 0) {
+            continue;
+        }
+
+        int opt = 1;
+        if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+            close(server_fd);
+            server_fd = -1;
+            continue;
+        }
+
+        if (p->ai_family == AF_INET6) {
+            int v6_only = 0;
+            setsockopt(server_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6_only, sizeof(v6_only));
+        }
+
+        if (bind(server_fd, p->ai_addr, p->ai_addrlen) == 0) {
+            if (listen(server_fd, 10) == 0) {
+                break; // success
+            }
+        }
+
+        close(server_fd);
+        server_fd = -1;
+    }
+
+    freeaddrinfo(info);
+
     if (server_fd < 0) {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
-
-    int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("setsockopt");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    struct sockaddr_in addr = derive_sockaddr(host, port);
-    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    if (listen(server_fd, 10) < 0) {
-        perror("listen");
-        close(server_fd);
+        perror("server setup");
         exit(EXIT_FAILURE);
     }
 
